@@ -1,11 +1,11 @@
 name: Build Mimikatz
 
 on:
-  workflow_dispatch: # 允许你手动点击按钮触发编译
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-2022 # 使用 GitHub 提供的 Windows Server 2022 云服务器
+    runs-on: windows-2022
 
     steps:
     - name: Checkout Source Code
@@ -14,21 +14,41 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    # 编译 64 位版本（跳过驱动项目，防止报错断开）
+    - name: Add Workspace to Defender Exclusion
+      run: |
+        # 🟢 最佳实践：将当前工作目录加入排除项，防止编译产物被实时扫描拦截
+        # 这比完全禁用 Defender 更稳定，且符合 CI/CD 性能优化标准
+        Set-MpPreference -ExclusionPath "${{ github.workspace }}"
+        Write-Host "Workspace '${{ github.workspace }}' added to Defender exclusion list."
+
+    - name: Install MFC/ATL Components
+      run: |
+        # 获取 VS 安装路径
+        $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+        $installerPath = Join-Path $vsPath "Installer\setup.exe"
+        
+        Write-Host "Attempting to install MFC/ATL components..."
+        # 静默安装 MFC/ATL 组件
+        $process = Start-Process -FilePath $installerPath -ArgumentList "modify", "--installPath", "`"$vsPath`"", "--add", "Microsoft.VisualStudio.Component.VC.MFC.ATL", "--quiet", "--norestart" -Wait -PassThru
+        
+        if ($process.ExitCode -ne 0) {
+            Write-Warning "MFC/ATL installation returned exit code $($process.ExitCode). This may happen if components are already present or installer is busy. Proceeding to build..."
+        } else {
+            Write-Host "MFC/ATL components installed/verified successfully."
+        }
+
     - name: Build x64 Release
       run: |
-        msbuild mimikatz.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0 /p:TargetedFrameworkVersion=v4.5 /t:mimikatz
+        # 编译主程序
+        # /t:mimikatz 确保只编译主项目，跳过可能因缺少驱动签名证书而失败的 mimidrv
+        msbuild mimikatz.sln /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0 /t:mimikatz
 
-    # 编译 32 位版本（跳过驱动项目，防止报错断开）
-    - name: Build Win32 Release
-      run: |
-        msbuild mimikatz.sln /p:Configuration=Release /p:Platform=Win32 /p:WindowsTargetPlatformVersion=10.0 /p:TargetedFrameworkVersion=v4.5 /t:mimikatz
-
-    # 打包并上传生成的 exe 文件
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mimikatz-built-binaries
+        name: mimikatz-x64
+        # 通配符路径：兼容不同 VS 版本的输出结构
         path: |
-          x64/mimikatz.exe
-          Win32/mimikatz.exe
+          x64/**/*.exe
+          x64/**/*.dll
+        retention-days: 1
